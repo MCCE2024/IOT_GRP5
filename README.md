@@ -2,7 +2,7 @@
 Dieses Repository beschreibt den IoT Usecase für das Studium MCCE2024 der Gruppe 5 sowie alle notwendigen Code-Snippets.
 
 ## Use Cases
-Folgende Grafik beschreibt die Zusammensetzung der drrei Häuser A, B und C symbolisch.
+Folgende Grafik beschreibt die Zusammensetzung der drei Häuser A, B und C symbolisch.
 ![Use Case Grafik](./img/iot-usecase-overview.png)
 
 ### Alle Häuser
