@@ -50,7 +50,7 @@ Rot unter vierzig Prozent Batterie bei aktivem Energiesparmodus.
 #include <PubSubClient.h>
 
 
-iFiClient espClient;
+WiFiClient espClient;
 PubSubClient client(espClient);
 long lastMsg = 0;
 char msg[50];
