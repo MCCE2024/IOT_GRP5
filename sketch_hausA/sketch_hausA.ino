@@ -36,6 +36,11 @@ Der SK6812 LED Streifen visualisiert den Batteriestatus über Farben.
 Grün bei mindestens sechzig Prozent Batterie.
 Gelb zwischen vierzig und neunundfünfzig Prozent Batterie.
 Rot unter vierzig Prozent Batterie bei aktivem Energiesparmodus.
+
+MQTT Integration
+Der Batteriestand wird als ganze Zahl in Prozent an ein MQTT Topic gesendet.
+Es wird nur gesendet, wenn sich der sichtbare Prozentwert ändert.
+Nach Tür, Fenster und Reset wird sofort ein Update publiziert.
 */
 
 #include <Arduino.h>
@@ -49,22 +54,26 @@ Rot unter vierzig Prozent Batterie bei aktivem Energiesparmodus.
 #include <WiFi.h>
 #include <PubSubClient.h>
 
-
 WiFiClient espClient;
 PubSubClient client(espClient);
-long lastMsg = 0;
+
 char msg[50];
 
-// WLAN-Zugangsdaten
+// WLAN Zugangsdaten
 const char* ssid = "";
 const char* password = "";
 
-// MQTT-Broker-Details
+// MQTT Broker Details
 const char* mqtt_server = "194.182.170.71";
 const int mqtt_port = 1883;
-const char* mqtt_client_id = "Keyestudio-Haus-A"; // MUSS EINZIGARTIG SEIN!
-const char* mqtt_topic_battery = "keyestudio/hausA/battery"; // Topic zum Senden
-float batteryLastSent = -1.0;
+const char* mqtt_client_id = "Keyestudio-Haus-A";
+const char* mqtt_topic_battery = "keyestudio/hausA/battery";
+
+// Batteriestand als Integer letzter gesendeter Wert
+int batteryLastSent = -1;
+
+// MQTT reconnect Steuerung
+unsigned long lastMqttReconnectAttempt = 0;
 
 // Hardwarebelegung
 const int BTN1_PIN = 16;
@@ -198,6 +207,22 @@ void applyFanState() {
   }
 }
 
+// MQTT Publish Logik
+
+void publishBatteryIfNeeded() {
+  if (!client.connected()) return;
+
+  int batteryRounded = (int)batteryPercent;
+  if (batteryRounded == batteryLastSent) return;
+
+  batteryLastSent = batteryRounded;
+  snprintf(msg, sizeof(msg), "%d", batteryRounded);
+  client.publish(mqtt_topic_battery, msg);
+
+  Serial.print("MQTT sent battery ");
+  Serial.println(batteryRounded);
+}
+
 // Servos
 
 void attachDoorServo() {
@@ -242,6 +267,7 @@ void moveDoorOnce(bool withCost) {
   if (!energySaveMode && withCost && !suppressMoveCost) {
     batteryPercent -= DOOR_MOVE_COST;
     if (batteryPercent < 0.0) batteryPercent = 0.0;
+    publishBatteryIfNeeded();
   }
   delay(300);
   detachDoorServo();
@@ -259,6 +285,7 @@ void moveWindowOnce(bool withCost) {
   if (!energySaveMode && withCost && !suppressMoveCost) {
     batteryPercent -= WINDOW_MOVE_COST;
     if (batteryPercent < 0.0) batteryPercent = 0.0;
+    publishBatteryIfNeeded();
   }
   delay(300);
   detachWindowServo();
@@ -347,10 +374,10 @@ void updateLcd() {
 void resetSystem() {
   energySaveMode = false;
 
-  fanOn      = false;
-  doorOpen   = false;
+  fanOn = false;
+  doorOpen = false;
   windowOpen = false;
-  buzzerOn   = false;
+  buzzerOn = false;
   marioPlaying = false;
 
   hardFanOff();
@@ -367,6 +394,7 @@ void resetSystem() {
 
   updateStatusLeds();
   updateLcd();
+  publishBatteryIfNeeded();
 }
 
 // Batterie
@@ -387,10 +415,12 @@ void updateBattery() {
     consumption += BUZZER_LOAD;
   }
 
-  batteryPercent -= consumption;
+  if (consumption > 0.0) {
+    batteryPercent -= consumption;
 
-  if (batteryPercent > 100.0) batteryPercent = 100.0;
-  if (batteryPercent < 0.0)   batteryPercent = 0.0;
+    if (batteryPercent > 100.0) batteryPercent = 100.0;
+    if (batteryPercent < 0.0)   batteryPercent = 0.0;
+  }
 
   bool prevEnergySave = energySaveMode;
   if (batteryPercent < 40.0) {
@@ -402,12 +432,11 @@ void updateBattery() {
   if (!prevEnergySave && energySaveMode) {
     bool doorWasOpen   = doorOpen;
     bool windowWasOpen = windowOpen;
-    bool buzzerWasOn   = buzzerOn;
 
-    fanOn      = false;
-    doorOpen   = false;
+    fanOn = false;
+    doorOpen = false;
     windowOpen = false;
-    buzzerOn   = false;
+    buzzerOn = false;
     marioPlaying = false;
 
     hardFanOff();
@@ -425,6 +454,7 @@ void updateBattery() {
 
   updateStatusLeds();
   updateLcd();
+  publishBatteryIfNeeded();
 }
 
 // Menü
@@ -523,22 +553,55 @@ void handleRfid() {
   rfidPassword = "";
 }
 
-// Setup
+// WLAN Setup mit Timeout
+
 void setup_wifi() {
-  delay(10);
-  Serial.println();
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
+  WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
 
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+    delay(300);
   }
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("WiFi connected");
+    Serial.println(WiFi.localIP());
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi connected");
+    lcd.setCursor(0, 1);
+    lcd.print(WiFi.localIP());
+    delay(800);
+  } else {
+    Serial.println("WiFi failed");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi failed");
+    lcd.setCursor(0, 1);
+    lcd.print("offline mode");
+    delay(800);
+  }
+}
+
+// MQTT reconnect non blocking
+
+void reconnectNonBlocking() {
+  if (client.connected()) return;
+
+  unsigned long now = millis();
+  if (now - lastMqttReconnectAttempt < 5000) return;
+  lastMqttReconnectAttempt = now;
+
+  Serial.print("Attempting MQTT connection...");
+  bool ok = client.connect(mqtt_client_id);
+  if (ok) {
+    Serial.println("connected");
+    publishBatteryIfNeeded();
+  } else {
+    Serial.print("failed rc=");
+    Serial.println(client.state());
+  }
 }
 
 // Setup
@@ -546,11 +609,15 @@ void setup_wifi() {
 void setup() {
   Serial.begin(115200);
 
-  setup_wifi();
-  client.setServer(mqtt_server, mqtt_port);
+  Wire.begin();
 
   lcd.init();
   lcd.backlight();
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Booting...");
+  lcd.setCursor(0, 1);
+  lcd.print("Haus A");
 
   strip.begin();
   strip.show();
@@ -569,35 +636,23 @@ void setup() {
   ESP32PWM::allocateTimer(2);
   ESP32PWM::allocateTimer(3);
 
+  pinMode(BTN1_PIN, INPUT_PULLUP);
+  pinMode(BTN2_PIN, INPUT_PULLUP);
+
   button1.attachClick(onBtn1Click);
   button1.attachLongPressStop(onBtn1LongPress);
   button2.attachClick(onBtn2Click);
 
-  Wire.begin();
   mfrc522.PCD_Init();
+
+  setup_wifi();
+
+  client.setServer(mqtt_server, mqtt_port);
 
   updateStatusLeds();
   updateLcd();
-  lastBatteryUpdate = millis();
-}
 
-void reconnect() {
-  // Loop, bis wir wieder verbunden sind
-  while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    // Versuche, eine Verbindung herzustellen
-    if (client.connect(mqtt_client_id)) {
-      Serial.println("connected");
-      // Optional: Ein Subskription-Topic für Befehle von Node-RED abonnieren
-      // client.subscribe("keyestudio/hausA/lampe/set");
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      // Warte 5 Sekunden, bevor der nächste Versuch gestartet wird
-      delay(5000);
-    }
-  }
+  lastBatteryUpdate = millis();
 }
 
 // Loop
@@ -610,19 +665,12 @@ void loop() {
   updateBattery();
   updateMarioMelody();
 
-  if (!client.connected()) {
-    reconnect();
-  }
-  client.loop(); // Muss regelmäßig aufgerufen werden, um Daten zu verarbeiten
+  reconnectNonBlocking();
 
-  // Topic schreiben wenn sich Batterielöadezustand ändert
-  if (batteryLastSent != batteryPercent) { 
-    batteryLastSent = batteryPercent;
-    snprintf (msg, 50, "%.0f", batteryPercent); // Wert in String umwandeln
-    Serial.print("Publishing battery: ");
-    Serial.println(msg);
-    client.publish(mqtt_topic_battery, msg); // Daten an den Broker senden
+  if (client.connected()) {
+    client.loop();
+    publishBatteryIfNeeded();
   }
 
- delay(10);
+  delay(5);
 }
