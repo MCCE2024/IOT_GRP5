@@ -46,6 +46,25 @@ Rot unter vierzig Prozent Batterie bei aktivem Energiesparmodus.
 #include "OneButton.h"
 #include "MFRC522_I2C.h"
 #include <BuzzerESP32.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
+
+
+iFiClient espClient;
+PubSubClient client(espClient);
+long lastMsg = 0;
+char msg[50];
+
+// WLAN-Zugangsdaten
+const char* ssid = "";
+const char* password = "";
+
+// MQTT-Broker-Details
+const char* mqtt_server = "194.182.170.71";
+const int mqtt_port = 1883;
+const char* mqtt_client_id = "Keyestudio-Haus-A"; // MUSS EINZIGARTIG SEIN!
+const char* mqtt_topic_battery = "keyestudio/hausA/battery"; // Topic zum Senden
+float batteryLastSent = -1.0;
 
 // Hardwarebelegung
 const int BTN1_PIN = 16;
@@ -505,9 +524,30 @@ void handleRfid() {
 }
 
 // Setup
+void setup_wifi() {
+  delay(10);
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+// Setup
 
 void setup() {
   Serial.begin(115200);
+
+  setup_wifi();
+  client.setServer(mqtt_server, mqtt_port);
 
   lcd.init();
   lcd.backlight();
@@ -541,6 +581,25 @@ void setup() {
   lastBatteryUpdate = millis();
 }
 
+void reconnect() {
+  // Loop, bis wir wieder verbunden sind
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Versuche, eine Verbindung herzustellen
+    if (client.connect(mqtt_client_id)) {
+      Serial.println("connected");
+      // Optional: Ein Subskription-Topic für Befehle von Node-RED abonnieren
+      // client.subscribe("keyestudio/hausA/lampe/set");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Warte 5 Sekunden, bevor der nächste Versuch gestartet wird
+      delay(5000);
+    }
+  }
+}
+
 // Loop
 
 void loop() {
@@ -551,5 +610,19 @@ void loop() {
   updateBattery();
   updateMarioMelody();
 
-  delay(10);
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop(); // Muss regelmäßig aufgerufen werden, um Daten zu verarbeiten
+
+  // Topic schreiben wenn sich Batterielöadezustand ändert
+  if (batteryLastSent != batteryPercent) { 
+    batteryLastSent = batteryPercent;
+    snprintf (msg, 50, "%.0f", batteryPercent); // Wert in String umwandeln
+    Serial.print("Publishing battery: ");
+    Serial.println(msg);
+    client.publish(mqtt_topic_battery, msg); // Daten an den Broker senden
+  }
+
+ delay(10);
 }
