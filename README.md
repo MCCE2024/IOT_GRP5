@@ -6,14 +6,16 @@ Folgende Grafik beschreibt die Zusammensetzung der drei Häuser A, B und C symbo
 ![Use Case Grafik](./img/iot-usecase-overview.png)
 
 ### Alle Häuser
-Jedes Haus besitzt einen Energiespeicher welcher einen individuellen Wert besitzt, welcher pro Haus unterschiedlich ist.
+Jedes Haus besitzt einen Energiespeicher (Batterie), welcher einen individuellen Wert besitzt, welcher pro Haus unterschiedlich ist.
 Jeder Verbraucher des Hauses verbraucht somit Energie von dem genannten Energiespeicher. Der Verbrauch ist je nach Verbraucher unterschiedlich.
 Eine Lampe benötigt weniger Energie als das Laden eines Autos usw. Der Verbrauch der jeweiligen Verwender kann auch je Haus variieren: z.B. LED vs. Glühbirne.
 
 Alle Häuser verfügen zudem über ein Energie-Warnsignal, welches die anderen Häuser benachrichtet, sollte der Energiespeicher unter 40% kapazität liegen. Die informierten Häuser können anschließend das Haus welches sich im Notfall befindet mit der eigenen Energie versorgen. Die Steuerung hierzu erfolgt über dIE IoT Plattform.
 
 ### Haus A - Smart Home
-Haus A besitzt die gleiche Standardfunktionen wie alle Häuser und bildet somit die Allgemeinheit der Gemeinschaft ab.
+Haus A ist ein energiehungriges Haus. Lüfter als elektrische Last mit kontinuierlichem Verbrauch bei Aktivität. Tür über Servo, jede Bewegung verbraucht einmalig fünf Prozent Batterie. Fenster über Servo, jede Bewegung verbraucht einmalig fünf Prozent Batterie. Buzzer spielt eine einfache Super Mario Melodie, solange er im Menü aktiviert ist. 
+Dabei funktioniert die Steuerung über ein Menü mit welchem man alle Verbrauer steuern kann. (Button eins kurzer Druck wählt das nächste Gerät im Menü; Button eins langer Druck wählt das vorherige Gerät im Menü; Button zwei kurzer Druck schaltet das aktuell gewählte Gerät ein oder aus)
+Der Menüpunkt Reset setzt die Batterie auf hundert Prozent und schaltet alle Verbraucher aus.
 
 ### Haus B - Elektro Auto Besitzer
 Der Besitzer des Hauses besitzt ein E-Auto, welches an jeder Ladesäule der Gemeinschaft geladen werden kann. Durch die Identifiaktion des Verwenders über RFID kann nachgewiesen werden, welches Haus die Ladetätigkeit verwendet. Somit wird zuerst der Energiespeicher des Hauses welches die Ladesäule besitzt verringert, während dessen der Verwender den Verbrauch begleicht indem er Energie weiterleitet.
