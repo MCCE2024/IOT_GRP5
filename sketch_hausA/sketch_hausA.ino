@@ -1,23 +1,24 @@
 /*
 README Haus A Energie Monitor und Power Alert
 
-Dieses Programm bildet ein energieautarkes Haus mit dem Keyestudio Smart Home Kit und ESP32 nach.
-Der Energiezustand wird als Batteriestand in Prozent modelliert. Nur aktive Verbraucher entladen die Batterie.
-LCD Anzeige und SK6812 Statusleiste bleiben immer aktiv und zählen nicht als Verbraucher.
+Dieses Programm modelliert ein energieautarkes Haus mit ESP32 und Keyestudio Smart Home Kit.
+Der Energiezustand wird als Batteriestand in Prozent geführt. Es existiert kein Grundverbrauch.
+Nur aktiv geschaltete Verbraucher reduzieren den Batteriestand.
 
-Steuerung
-Button eins kurzer Druck wählt das nächste Gerät im Menü
-Button eins langer Druck wählt das vorherige Gerät im Menü
-Button zwei kurzer Druck schaltet das aktuell gewählte Gerät ein oder aus
-RFID öffnet die Tür bei gültiger UID und wenn kein Energiesparmodus aktiv ist
-Reset setzt Batterie auf 100 und schaltet alle Verbraucher ab
+Bedienung
+Linker Button kurzer Druck wählt das nächste Gerät
+Linker Button langer Druck wählt das vorherige Gerät
+Rechter Button kurzer Druck schaltet das ausgewählte Gerät
+RFID öffnet die Tür bei gültiger UID wenn kein Energiesparmodus aktiv ist
+Reset setzt Batterie auf 100 Prozent und schaltet alle Verbraucher aus
 
 Verbraucher
 Fan kontinuierlich
-Buzzer kontinuierlich
-Yellow LED kontinuierlich
-Door einmalig pro Aktion
-Window einmalig pro Aktion
+Buzzer kontinuierlich mit Super Mario Loop
+Gelbe LED kontinuierlich
+Tür einmalig 5 Prozent pro Bewegung
+Fenster einmalig 5 Prozent pro Bewegung
+Party Mode eigener Modus mit konstant 1 Prozent pro Sekunde
 
 Energiesparmodus
 Unter 40 Prozent werden alle Verbraucher abgeschaltet und Party Mode beendet
@@ -25,17 +26,11 @@ Unter 60 Prozent SK6812 gelb
 Ab 60 Prozent SK6812 grün
 Energiesparmodus SK6812 rot
 
-MQTT
-Batteriestand wird als ganze Zahl in Prozent an keyestudio/hausA/battery gesendet
-Senden erfolgt nur bei sichtbarer Prozentänderung
-WLAN und MQTT sind non blocking, Menü bleibt bedienbar
-
 Party Mode
-Party Mode ist ein eigener Menüpunkt
-Im Party Mode laufen Fan, Yellow LED, Buzzer dauerhaft
-Door und Window fahren zyklisch auf und zu
-Batterieabzug ist deutlich schneller und kontinuierlich, damit der Effekt sichtbar ist
-Während Party Mode aktiv ist, sind andere Menüaktionen gesperrt, nur Party und Reset sind schaltbar
+Tür und Fenster bewegen zyklisch auf und zu
+Gelbe LED an
+Buzzer an
+Fan bleibt im Party Mode immer aus, unabhängig vom Menüstatus
 */
 
 #include <Arduino.h>
@@ -43,16 +38,11 @@ Während Party Mode aktiv ist, sind andere Menüaktionen gesperrt, nur Party und
 #include <LiquidCrystal_I2C.h>
 #include <Adafruit_NeoPixel.h>
 #include <ESP32Servo.h>
-#include "OneButton.h"
-#include "MFRC522_I2C.h"
+#include <OneButton.h>
+#include <MFRC522_I2C.h>
 #include <BuzzerESP32.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
-
-WiFiClient espClient;
-PubSubClient client(espClient);
-
-char msg[50];
 
 const char* ssid = "";
 const char* password = "";
@@ -62,27 +52,29 @@ const int mqtt_port = 1883;
 const char* mqtt_client_id = "Keyestudio-Haus-A";
 const char* mqtt_topic_battery = "keyestudio/hausA/battery";
 
+WiFiClient espClient;
+PubSubClient client(espClient);
+char msg[50];
 int batteryLastSent = -1;
 
-const int BTN1_PIN = 16;
-const int BTN2_PIN = 27;
+const int BTN_LEFT_PIN  = 16;
+const int BTN_RIGHT_PIN = 27;
 
 const int FAN_PIN1 = 19;
 const int FAN_PIN2 = 18;
 
-const int SK_PIN = 26;
-const int SK_LED_COUNT = 4;
-
-const int SERVO_DOOR_PIN = 13;
+const int SERVO_DOOR_PIN   = 13;
 const int SERVO_WINDOW_PIN = 5;
 
 const int BUZ_PIN = 25;
-
 const int YELLOW_LED_PIN = 12;
 
+const int SK_PIN = 26;
+const int SK_LED_COUNT = 4;
+
 LiquidCrystal_I2C lcd(0x27, 16, 2);
-MFRC522 mfrc522(0x28);
 Adafruit_NeoPixel strip(SK_LED_COUNT, SK_PIN, NEO_GRB + NEO_KHZ800);
+MFRC522 mfrc522(0x28);
 
 Servo servoDoor;
 Servo servoWindow;
@@ -91,8 +83,8 @@ bool windowServoAttached = false;
 
 BuzzerESP32 buzzer(BUZ_PIN);
 
-OneButton button1(BTN1_PIN, true);
-OneButton button2(BTN2_PIN, true);
+OneButton btnLeft(BTN_LEFT_PIN, true);
+OneButton btnRight(BTN_RIGHT_PIN, true);
 
 float batteryPercent = 100.0f;
 
@@ -103,6 +95,8 @@ const float YELLOW_LED_LOAD = 1.0f;
 const float DOOR_MOVE_COST   = 5.0f;
 const float WINDOW_MOVE_COST = 5.0f;
 
+const float PARTY_LOAD_PER_SECOND = 1.0f;
+
 bool energySaveMode = false;
 
 bool fanOn = false;
@@ -111,15 +105,11 @@ bool windowOpen = false;
 bool buzzerOn = false;
 bool yellowLedOn = false;
 
-bool suppressMoveCost = false;
-
 bool partyModeOn = false;
 unsigned long lastPartyMove = 0;
-const unsigned long PARTY_MOVE_INTERVAL_MS = 1200;
-bool partyDoorState = false;
-bool partyWindowState = false;
+const unsigned long PARTY_MOVE_INTERVAL_MS = 2200;
 
-const float PARTY_EXTRA_LOAD = 8.0f;
+bool suppressMoveCost = false;
 
 enum Device {
   DEV_FAN = 0,
@@ -137,47 +127,49 @@ int selectedDevice = DEV_FAN;
 String rfidPassword = "";
 String correctPassword = "845138219";
 
-const int marioNotes[] = {
-  659, 659, 659, 523, 659, 784,
-  0,
-  523, 0, 392, 0, 330
-};
-
-const int marioDurations[] = {
-  150, 150, 150, 150, 150, 300,
-  300,
-  300, 150, 300, 150, 400
-};
-
+const int marioNotes[] = { 659,659,659,523,659,784,0,523,0,392,0,330 };
+const int marioDurations[] = { 150,150,150,150,150,300,300,300,150,300,150,400 };
 const int MARIO_LENGTH = sizeof(marioNotes) / sizeof(marioNotes[0]);
+
 int marioIndex = 0;
 unsigned long marioNextChange = 0;
 bool marioPlaying = false;
 
-bool wifiWasConnected = false;
-unsigned long lastWifiCheck = 0;
-const unsigned long WIFI_CHECK_MS = 2000;
+unsigned long lastBatteryMillis = 0;
+
+unsigned long lastWifiReconnectAttempt = 0;
+const unsigned long WIFI_RECONNECT_MS = 8000;
 
 unsigned long lastMqttReconnectAttempt = 0;
 const unsigned long MQTT_RECONNECT_MS = 5000;
 
-unsigned long lastBatteryMillis = 0;
+enum MoveState { MOVE_IDLE = 0, MOVE_DOOR_ACTIVE = 1, MOVE_WINDOW_ACTIVE = 2 };
+MoveState moveState = MOVE_IDLE;
+unsigned long moveUntilMs = 0;
+const unsigned long SERVO_ACTIVE_MS = 180;
+
+bool queuedDoorMove = false;
+bool queuedWindowMove = false;
+bool queuedDoorCost = false;
+bool queuedWindowCost = false;
+
+void lcdPrint16(uint8_t row, const String& text) {
+  String t = text;
+  if (t.length() > 16) t = t.substring(0, 16);
+  while (t.length() < 16) t += " ";
+  lcd.setCursor(0, row);
+  lcd.print(t);
+}
 
 void setAllPixels(uint32_t color) {
-  for (int i = 0; i < strip.numPixels(); i++) {
-    strip.setPixelColor(i, color);
-  }
+  for (int i = 0; i < strip.numPixels(); i++) strip.setPixelColor(i, color);
   strip.show();
 }
 
 void updateStatusLeds() {
-  if (energySaveMode) {
-    setAllPixels(strip.Color(255, 0, 0));
-  } else if (batteryPercent < 60.0f) {
-    setAllPixels(strip.Color(255, 255, 0));
-  } else {
-    setAllPixels(strip.Color(0, 255, 0));
-  }
+  if (energySaveMode) setAllPixels(strip.Color(255, 0, 0));
+  else if (batteryPercent < 60.0f) setAllPixels(strip.Color(255, 255, 0));
+  else setAllPixels(strip.Color(0, 255, 0));
 }
 
 void hardFanOff() {
@@ -187,223 +179,212 @@ void hardFanOff() {
 }
 
 void applyFanState() {
-  if (fanOn && !energySaveMode) {
-    digitalWrite(FAN_PIN1, HIGH);
+  if (partyModeOn) {
+    digitalWrite(FAN_PIN1, LOW);
     digitalWrite(FAN_PIN2, LOW);
-  } else {
-    hardFanOff();
+    return;
   }
+  if (energySaveMode || !fanOn) {
+    digitalWrite(FAN_PIN1, LOW);
+    digitalWrite(FAN_PIN2, LOW);
+    return;
+  }
+  digitalWrite(FAN_PIN1, HIGH);
+  digitalWrite(FAN_PIN2, LOW);
 }
 
 void applyYellowLedState() {
-  if (yellowLedOn && !energySaveMode) {
-    digitalWrite(YELLOW_LED_PIN, HIGH);
-  } else {
-    digitalWrite(YELLOW_LED_PIN, LOW);
-    yellowLedOn = false;
-  }
+  if (yellowLedOn && !energySaveMode) digitalWrite(YELLOW_LED_PIN, HIGH);
+  else digitalWrite(YELLOW_LED_PIN, LOW);
 }
 
 void publishBatteryIfNeeded() {
   if (!client.connected()) return;
-
   int batteryRounded = (int)batteryPercent;
   if (batteryRounded == batteryLastSent) return;
-
   batteryLastSent = batteryRounded;
   snprintf(msg, sizeof(msg), "%d", batteryRounded);
   client.publish(mqtt_topic_battery, msg);
-
-  Serial.print("MQTT sent battery ");
-  Serial.println(batteryRounded);
 }
 
 void attachDoorServo() {
-  if (!doorServoAttached) {
-    servoDoor.setPeriodHertz(50);
-    servoDoor.attach(SERVO_DOOR_PIN, 1000, 2000);
-    doorServoAttached = true;
-  }
+  if (doorServoAttached) return;
+  servoDoor.setPeriodHertz(50);
+  servoDoor.attach(SERVO_DOOR_PIN, 1000, 2000);
+  doorServoAttached = true;
 }
 
 void detachDoorServo() {
-  if (doorServoAttached) {
-    servoDoor.detach();
-    doorServoAttached = false;
-  }
+  if (!doorServoAttached) return;
+  servoDoor.detach();
+  doorServoAttached = false;
 }
 
 void attachWindowServo() {
-  if (!windowServoAttached) {
-    servoWindow.setPeriodHertz(50);
-    servoWindow.attach(SERVO_WINDOW_PIN, 1000, 2000);
-    windowServoAttached = true;
-  }
+  if (windowServoAttached) return;
+  servoWindow.setPeriodHertz(50);
+  servoWindow.attach(SERVO_WINDOW_PIN, 1000, 2000);
+  windowServoAttached = true;
 }
 
 void detachWindowServo() {
-  if (windowServoAttached) {
-    servoWindow.detach();
-    windowServoAttached = false;
-  }
+  if (!windowServoAttached) return;
+  servoWindow.detach();
+  windowServoAttached = false;
 }
 
-void moveDoorOnce(bool withCost) {
-  attachDoorServo();
+void requestDoorMove(bool withCost) {
+  if (energySaveMode) return;
 
-  if (!energySaveMode && doorOpen) {
-    servoDoor.write(180);
-  } else {
-    servoDoor.write(0);
+  if (moveState != MOVE_IDLE) {
+    queuedDoorMove = true;
+    queuedDoorCost = withCost && !suppressMoveCost;
+    return;
   }
 
-  if (!energySaveMode && withCost && !suppressMoveCost) {
+  moveState = MOVE_DOOR_ACTIVE;
+  moveUntilMs = millis() + SERVO_ACTIVE_MS;
+
+  attachDoorServo();
+  servoDoor.write(doorOpen ? 180 : 0);
+
+  if (withCost && !suppressMoveCost) {
     batteryPercent -= DOOR_MOVE_COST;
     if (batteryPercent < 0.0f) batteryPercent = 0.0f;
   }
 
-  delay(150);
-  detachDoorServo();
-
   publishBatteryIfNeeded();
 }
 
-void moveWindowOnce(bool withCost) {
-  attachWindowServo();
+void requestWindowMove(bool withCost) {
+  if (energySaveMode) return;
 
-  if (!energySaveMode && windowOpen) {
-    servoWindow.write(180);
-  } else {
-    servoWindow.write(0);
+  if (moveState != MOVE_IDLE) {
+    queuedWindowMove = true;
+    queuedWindowCost = withCost && !suppressMoveCost;
+    return;
   }
 
-  if (!energySaveMode && withCost && !suppressMoveCost) {
+  moveState = MOVE_WINDOW_ACTIVE;
+  moveUntilMs = millis() + SERVO_ACTIVE_MS;
+
+  attachWindowServo();
+  servoWindow.write(windowOpen ? 180 : 0);
+
+  if (withCost && !suppressMoveCost) {
     batteryPercent -= WINDOW_MOVE_COST;
     if (batteryPercent < 0.0f) batteryPercent = 0.0f;
   }
 
-  delay(150);
-  detachWindowServo();
-
   publishBatteryIfNeeded();
 }
 
-void stopBuzzerTone() {
-  marioPlaying = false;
-  buzzerOn = false;
-  buzzer.playTone(0, 0);
+void moveTick() {
+  if (moveState != MOVE_IDLE && millis() >= moveUntilMs) {
+    if (moveState == MOVE_DOOR_ACTIVE) detachDoorServo();
+    if (moveState == MOVE_WINDOW_ACTIVE) detachWindowServo();
+    moveState = MOVE_IDLE;
+  }
+
+  if (moveState == MOVE_IDLE) {
+    if (queuedDoorMove) {
+      bool cost = queuedDoorCost;
+      queuedDoorMove = false;
+      queuedDoorCost = false;
+      requestDoorMove(cost);
+      return;
+    }
+    if (queuedWindowMove) {
+      bool cost = queuedWindowCost;
+      queuedWindowMove = false;
+      queuedWindowCost = false;
+      requestWindowMove(cost);
+      return;
+    }
+  }
 }
 
 void startMario() {
   marioIndex = 0;
-  marioNextChange = 0;
   marioPlaying = true;
+  marioNextChange = millis();
+}
+
+void stopMario() {
+  marioPlaying = false;
+  buzzer.playTone(0, 0);
 }
 
 void updateMarioMelody() {
   if (!buzzerOn || energySaveMode) {
-    if (marioPlaying) {
-      buzzer.playTone(0, 0);
-      marioPlaying = false;
-    }
+    if (marioPlaying) stopMario();
     return;
   }
 
   unsigned long now = millis();
+  if (!marioPlaying) startMario();
 
-  if (!marioPlaying) {
-    startMario();
-  }
+  while ((long)(now - marioNextChange) >= 0) {
+    int freq = marioNotes[marioIndex];
+    int dur  = marioDurations[marioIndex];
 
-  if (now < marioNextChange) {
-    return;
-  }
+    if (freq > 0) buzzer.playTone(freq, 0);
+    else buzzer.playTone(0, 0);
 
-  int freq = marioNotes[marioIndex];
-  int dur = marioDurations[marioIndex];
+    marioNextChange += (unsigned long)dur;
 
-  buzzer.playTone(freq, dur);
-
-  marioNextChange = now + (unsigned long)dur;
-  marioIndex++;
-  if (marioIndex >= MARIO_LENGTH) {
-    marioIndex = 0;
+    marioIndex++;
+    if (marioIndex >= MARIO_LENGTH) marioIndex = 0;
   }
 }
 
 void updateLcd() {
-  lcd.clear();
+  int b = (int)batteryPercent;
+  lcdPrint16(0, String(b) + " %");
 
-  lcd.setCursor(0, 0);
-  lcd.print((int)batteryPercent);
-  lcd.print(" %");
+  String line2;
 
-  lcd.setCursor(0, 1);
-  switch (selectedDevice) {
-    case DEV_FAN:
-      lcd.print("Fan ");
-      lcd.print(fanOn ? "ON " : "OFF");
-      break;
-
-    case DEV_DOOR:
-      lcd.print("Door ");
-      lcd.print(doorOpen ? "OPEN" : "CLOSE");
-      break;
-
-    case DEV_WINDOW:
-      lcd.print("Win ");
-      lcd.print(windowOpen ? "OPEN" : "CLOSE");
-      break;
-
-    case DEV_BUZZER:
-      lcd.print("Buzz ");
-      lcd.print(buzzerOn ? "ON " : "OFF");
-      break;
-
-    case DEV_YELLOW_LED:
-      lcd.print("Yellow ");
-      lcd.print(yellowLedOn ? "ON " : "OFF");
-      break;
-
-    case DEV_PARTY:
-      lcd.print("Party ");
-      lcd.print(partyModeOn ? "ON " : "OFF");
-      break;
-
-    case DEV_RESET:
-      lcd.print("Reset Ready");
-      break;
+  if (energySaveMode) {
+    line2 = "Energy Save";
+    lcdPrint16(1, line2);
+    return;
   }
+
+  if (selectedDevice == DEV_FAN) line2 = String("Fan ") + (fanOn ? "ON" : "OFF");
+  if (selectedDevice == DEV_DOOR) line2 = String("Door ") + (doorOpen ? "OPEN" : "CLOSE");
+  if (selectedDevice == DEV_WINDOW) line2 = String("Win ") + (windowOpen ? "OPEN" : "CLOSE");
+  if (selectedDevice == DEV_BUZZER) line2 = String("Buzz ") + (buzzerOn ? "ON" : "OFF");
+  if (selectedDevice == DEV_YELLOW_LED) line2 = String("Yellow ") + (yellowLedOn ? "ON" : "OFF");
+  if (selectedDevice == DEV_PARTY) line2 = String("Party ") + (partyModeOn ? "ON" : "OFF");
+  if (selectedDevice == DEV_RESET) line2 = "Reset Ready";
+
+  lcdPrint16(1, line2);
 }
 
 void stopPartyMode() {
   partyModeOn = false;
 
-  fanOn = false;
-  buzzerOn = false;
   yellowLedOn = false;
+  buzzerOn = false;
+
+  applyYellowLedState();
+  stopMario();
 
   hardFanOff();
-  stopBuzzerTone();
-  applyYellowLedState();
-
-  partyDoorState = false;
-  partyWindowState = false;
+  applyFanState();
 }
 
 void startPartyMode() {
   partyModeOn = true;
 
-  fanOn = true;
-  buzzerOn = true;
-  yellowLedOn = true;
-
+  hardFanOff();
   applyFanState();
-  applyYellowLedState();
-  startMario();
 
-  partyDoorState = doorOpen;
-  partyWindowState = windowOpen;
+  yellowLedOn = true;
+  applyYellowLedState();
+
+  buzzerOn = true;
+  startMario();
 
   lastPartyMove = millis();
 }
@@ -412,50 +393,47 @@ void updatePartyMode() {
   if (!partyModeOn) return;
   if (energySaveMode) return;
 
+  hardFanOff();
+  applyFanState();
+
   unsigned long now = millis();
   if (now - lastPartyMove < PARTY_MOVE_INTERVAL_MS) return;
   lastPartyMove = now;
 
-  partyDoorState = !partyDoorState;
-  partyWindowState = !partyWindowState;
-
-  doorOpen = partyDoorState;
-  windowOpen = partyWindowState;
+  doorOpen = !doorOpen;
+  windowOpen = !windowOpen;
 
   suppressMoveCost = true;
-  moveDoorOnce(false);
-  moveWindowOnce(false);
+  requestDoorMove(false);
+  requestWindowMove(false);
   suppressMoveCost = false;
 }
 
 void resetSystem() {
-  energySaveMode = false;
-
   stopPartyMode();
 
+  energySaveMode = false;
+
   fanOn = false;
+  yellowLedOn = false;
+  buzzerOn = false;
+
   doorOpen = false;
   windowOpen = false;
-  buzzerOn = false;
-  marioPlaying = false;
-  yellowLedOn = false;
 
   hardFanOff();
-  buzzer.playTone(0, 0);
   applyYellowLedState();
+  stopMario();
 
   suppressMoveCost = true;
-  moveDoorOnce(false);
-  moveWindowOnce(false);
+  requestDoorMove(false);
+  requestWindowMove(false);
   suppressMoveCost = false;
 
   batteryPercent = 100.0f;
-
-  applyFanState();
-  applyYellowLedState();
+  batteryLastSent = -1;
 
   updateStatusLeds();
-  updateLcd();
   publishBatteryIfNeeded();
 }
 
@@ -467,132 +445,100 @@ void updateBattery() {
   if (dtSeconds < 0.05f) return;
   lastBatteryMillis = now;
 
-  float loadPerSecond = 0.0f;
-
-  if (fanOn && !energySaveMode) loadPerSecond += FAN_LOAD;
-  if (buzzerOn && !energySaveMode) loadPerSecond += BUZZER_LOAD;
-  if (yellowLedOn && !energySaveMode) loadPerSecond += YELLOW_LED_LOAD;
-
-  if (partyModeOn && !energySaveMode) loadPerSecond += PARTY_EXTRA_LOAD;
-
-  if (loadPerSecond > 0.0f) {
-    batteryPercent -= loadPerSecond * dtSeconds;
-    if (batteryPercent < 0.0f) batteryPercent = 0.0f;
-    if (batteryPercent > 100.0f) batteryPercent = 100.0f;
+  if (partyModeOn && !energySaveMode) {
+    batteryPercent -= PARTY_LOAD_PER_SECOND * dtSeconds;
+  } else {
+    float loadPerSecond = 0.0f;
+    if (fanOn && !energySaveMode) loadPerSecond += FAN_LOAD;
+    if (buzzerOn && !energySaveMode) loadPerSecond += BUZZER_LOAD;
+    if (yellowLedOn && !energySaveMode) loadPerSecond += YELLOW_LED_LOAD;
+    if (loadPerSecond > 0.0f) batteryPercent -= loadPerSecond * dtSeconds;
   }
 
-  bool prevEnergySave = energySaveMode;
-  energySaveMode = (batteryPercent < 40.0f);
+  if (batteryPercent < 0.0f) batteryPercent = 0.0f;
+  if (batteryPercent > 100.0f) batteryPercent = 100.0f;
 
-  if (!prevEnergySave && energySaveMode) {
-    bool doorWasOpen = doorOpen;
-    bool windowWasOpen = windowOpen;
+  bool prev = energySaveMode;
+  energySaveMode = batteryPercent < 40.0f;
 
+  if (!prev && energySaveMode) {
     stopPartyMode();
-
-    fanOn = false;
-    doorOpen = false;
-    windowOpen = false;
-    buzzerOn = false;
-    marioPlaying = false;
-    yellowLedOn = false;
-
     hardFanOff();
-    buzzer.playTone(0, 0);
+    yellowLedOn = false;
+    buzzerOn = false;
     applyYellowLedState();
-
-    suppressMoveCost = true;
-    if (doorWasOpen) moveDoorOnce(false);
-    if (windowWasOpen) moveWindowOnce(false);
-    suppressMoveCost = false;
+    stopMario();
   }
 
   applyFanState();
   applyYellowLedState();
 
   updateStatusLeds();
-  updateLcd();
   publishBatteryIfNeeded();
 }
 
 void selectNextDevice() {
   selectedDevice++;
   if (selectedDevice >= DEV_COUNT) selectedDevice = 0;
-  updateLcd();
 }
 
 void selectPrevDevice() {
   if (selectedDevice == 0) selectedDevice = DEV_COUNT - 1;
   else selectedDevice--;
-  updateLcd();
 }
 
 void toggleSelectedDevice() {
-  if (selectedDevice != DEV_RESET && energySaveMode) return;
-
-  if (partyModeOn && selectedDevice != DEV_PARTY && selectedDevice != DEV_RESET) {
-    updateLcd();
+  if (selectedDevice == DEV_RESET) {
+    resetSystem();
     return;
   }
 
-  switch (selectedDevice) {
-    case DEV_FAN:
-      fanOn = !fanOn;
-      applyFanState();
-      break;
+  if (energySaveMode) return;
 
-    case DEV_DOOR:
-      hardFanOff();
-      doorOpen = !doorOpen;
-      moveDoorOnce(true);
-      break;
-
-    case DEV_WINDOW:
-      hardFanOff();
-      windowOpen = !windowOpen;
-      moveWindowOnce(true);
-      break;
-
-    case DEV_BUZZER:
-      hardFanOff();
-      if (buzzerOn) stopBuzzerTone();
-      else {
-        buzzerOn = true;
-        startMario();
-      }
-      break;
-
-    case DEV_YELLOW_LED:
-      hardFanOff();
-      yellowLedOn = !yellowLedOn;
-      applyYellowLedState();
-      break;
-
-    case DEV_PARTY:
-      if (partyModeOn) stopPartyMode();
-      else startPartyMode();
-      break;
-
-    case DEV_RESET:
-      resetSystem();
-      break;
+  if (partyModeOn && selectedDevice != DEV_PARTY) {
+    stopPartyMode();
   }
 
-  updateLcd();
-  publishBatteryIfNeeded();
+  if (selectedDevice == DEV_FAN) {
+    fanOn = !fanOn;
+    applyFanState();
+    return;
+  }
+
+  if (selectedDevice == DEV_DOOR) {
+    doorOpen = !doorOpen;
+    requestDoorMove(true);
+    return;
+  }
+
+  if (selectedDevice == DEV_WINDOW) {
+    windowOpen = !windowOpen;
+    requestWindowMove(true);
+    return;
+  }
+
+  if (selectedDevice == DEV_BUZZER) {
+    buzzerOn = !buzzerOn;
+    if (!buzzerOn) stopMario();
+    return;
+  }
+
+  if (selectedDevice == DEV_YELLOW_LED) {
+    yellowLedOn = !yellowLedOn;
+    applyYellowLedState();
+    return;
+  }
+
+  if (selectedDevice == DEV_PARTY) {
+    if (partyModeOn) stopPartyMode();
+    else startPartyMode();
+    return;
+  }
 }
 
-void onBtn1Click() {
-  selectNextDevice();
-}
-
-void onBtn1LongPress() {
-  selectPrevDevice();
-}
-
-void onBtn2Click() {
-  toggleSelectedDevice();
-}
+void onLeftClick() { selectNextDevice(); }
+void onLeftLongPress() { selectPrevDevice(); }
+void onRightClick() { toggleSelectedDevice(); }
 
 void handleRfid() {
   if (!mfrc522.PICC_IsNewCardPresent() || !mfrc522.PICC_ReadCardSerial()) {
@@ -601,41 +547,24 @@ void handleRfid() {
   }
 
   rfidPassword = "";
-  for (byte i = 0; i < mfrc522.uid.size; i++) {
-    rfidPassword += String(mfrc522.uid.uidByte[i]);
-  }
+  for (byte i = 0; i < mfrc522.uid.size; i++) rfidPassword += String(mfrc522.uid.uidByte[i]);
 
   if (!energySaveMode && !partyModeOn && rfidPassword == correctPassword) {
     doorOpen = true;
-    moveDoorOnce(true);
-    updateLcd();
+    requestDoorMove(true);
   }
 
   rfidPassword = "";
 }
 
 void wifiManagerTick() {
+  if (WiFi.status() == WL_CONNECTED) return;
+
   unsigned long now = millis();
-  if (now - lastWifiCheck < WIFI_CHECK_MS) return;
-  lastWifiCheck = now;
+  if (now - lastWifiReconnectAttempt < WIFI_RECONNECT_MS) return;
+  lastWifiReconnectAttempt = now;
 
-  bool isConnected = (WiFi.status() == WL_CONNECTED);
-
-  if (!isConnected) {
-    if (wifiWasConnected) {
-      wifiWasConnected = false;
-      Serial.println("WiFi disconnected");
-    }
-    WiFi.disconnect(false);
-    WiFi.begin(ssid, password);
-    return;
-  }
-
-  if (!wifiWasConnected) {
-    wifiWasConnected = true;
-    Serial.println("WiFi connected");
-    Serial.println(WiFi.localIP());
-  }
+  WiFi.reconnect();
 }
 
 void mqttManagerTick() {
@@ -646,29 +575,15 @@ void mqttManagerTick() {
   if (now - lastMqttReconnectAttempt < MQTT_RECONNECT_MS) return;
   lastMqttReconnectAttempt = now;
 
-  Serial.print("Attempting MQTT connection...");
-  bool ok = client.connect(mqtt_client_id);
-  if (ok) {
-    Serial.println("connected");
-    publishBatteryIfNeeded();
-  } else {
-    Serial.print("failed rc=");
-    Serial.println(client.state());
-  }
+  client.connect(mqtt_client_id);
 }
 
 void setup() {
   Serial.begin(115200);
-
   Wire.begin();
 
   lcd.init();
   lcd.backlight();
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Booting...");
-  lcd.setCursor(0, 1);
-  lcd.print("Haus A");
 
   strip.begin();
   strip.show();
@@ -683,19 +598,21 @@ void setup() {
 
   buzzer.setTimbre(30);
   buzzer.playTone(0, 0);
-  marioPlaying = false;
 
   ESP32PWM::allocateTimer(0);
   ESP32PWM::allocateTimer(1);
   ESP32PWM::allocateTimer(2);
   ESP32PWM::allocateTimer(3);
 
-  pinMode(BTN1_PIN, INPUT_PULLUP);
-  pinMode(BTN2_PIN, INPUT_PULLUP);
+  btnLeft.attachClick(onLeftClick);
+  btnLeft.attachLongPressStop(onLeftLongPress);
+  btnRight.attachClick(onRightClick);
 
-  button1.attachClick(onBtn1Click);
-  button1.attachLongPressStop(onBtn1LongPress);
-  button2.attachClick(onBtn2Click);
+  btnLeft.setDebounceMs(35);
+  btnRight.setDebounceMs(35);
+  btnLeft.setClickMs(450);
+  btnRight.setClickMs(450);
+  btnLeft.setPressMs(700);
 
   mfrc522.PCD_Init();
 
@@ -705,30 +622,26 @@ void setup() {
 
   client.setServer(mqtt_server, mqtt_port);
 
+  lastBatteryMillis = millis();
+
   updateStatusLeds();
   updateLcd();
-
-  lastBatteryMillis = millis();
 }
 
 void loop() {
-  button1.tick();
-  button2.tick();
+  btnLeft.tick();
+  btnRight.tick();
 
   wifiManagerTick();
   mqttManagerTick();
-
-  if (client.connected()) {
-    client.loop();
-  }
+  if (client.connected()) client.loop();
 
   handleRfid();
 
   updatePartyMode();
   updateBattery();
   updateMarioMelody();
+  moveTick();
 
-  publishBatteryIfNeeded();
-
-  delay(2);
+  updateLcd();
 }
