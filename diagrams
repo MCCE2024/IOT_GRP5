@@ -1,0 +1,267 @@
+--Physische Sicht - Verteilungsdiagramm
+
+@startuml
+node "Haus A\nESP32" as A {
+  artifact "Firmware Haus A" as A_fw
+}
+node "Haus C\nESP32" as C {
+  artifact "Firmware Haus C" as C_fw
+}
+
+node "Lokales Netzwerk" as lan
+node "MQTT Broker" as broker
+node "Node-RED\nOrchestrierung" as nodered
+node "HomeKit\nUI Ebene" as homekit
+
+A -- lan
+C -- lan
+lan -- broker
+broker -- nodered
+nodered -- homekit
+
+rectangle "Peripherie Haus A" {
+  node "LCD" as lcdA
+  node "SK6812 LED" as ledA
+  node "Aktoren" as actA
+}
+rectangle "Peripherie Haus C" {
+  node "LCD" as lcdC
+  node "SK6812 LED" as ledC
+  node "Aktoren" as actC
+}
+
+A -- lcdA
+A -- ledA
+A -- actA
+
+C -- lcdC
+C -- ledC
+C -- actC
+@enduml
+
+
+--Prozess Sicht - Sequenzdiagramm
+
+@startuml
+participant "Haus A\nBatteryModel" as A_bat
+participant "Haus A\nMQTT Publisher" as A_pub
+participant "Haus C\nBatteryModel" as C_bat
+participant "Haus C\nMQTT Publisher" as C_pub
+participant "MQTT Broker" as broker
+participant "Node-RED\nOrchestrierung" as nodered
+participant "HomeKit\nUI" as homekit
+
+note over nodered
+Annahme Transfer
+5 Prozentpunkte je Intervall
+Intervall 10 Sekunden
+Stop Bedingung Haus C unter 60 Prozent
+Ziel Haus A 100 Prozent
+Ende danach Haus C auf 100 Prozent
+end note
+
+loop zyklisch Status
+  A_pub -> broker : publish batteryA percent
+  C_pub -> broker : publish batteryC percent
+end
+
+broker -> nodered : deliver batteryA percent
+broker -> nodered : deliver batteryC percent
+
+alt Haus A unter 40 Prozent oder Unterstützungsbedarf erkannt
+  nodered -> homekit : update status support planned
+end
+
+alt Haus C unter 60 Prozent
+  loop je 10 Sekunden bis Haus C mindestens 60 Prozent
+    nodered -> C_bat : increment 5 percent points
+    C_pub -> broker : publish batteryC percent
+  end
+end
+
+alt Haus C mindestens 60 Prozent und Haus A unter 100 Prozent
+  loop je 10 Sekunden solange Bedingungen erfüllt
+    nodered -> C_bat : decrement 5 percent points
+    nodered -> A_bat : increment 5 percent points
+    A_pub -> broker : publish batteryA percent
+    C_pub -> broker : publish batteryC percent
+
+    broker -> nodered : deliver updated percents
+
+    alt Haus C unter 60 Prozent
+      nodered -> homekit : update status support paused
+      break
+    end
+
+    alt Haus A 100 Prozent
+      nodered -> homekit : update status support complete
+      break
+    end
+  end
+end
+
+alt Haus A 100 Prozent und Haus C unter 100 Prozent
+  loop je 10 Sekunden bis Haus C 100 Prozent
+    nodered -> C_bat : increment 5 percent points
+    C_pub -> broker : publish batteryC percent
+  end
+end
+@enduml
+
+
+--Entwicklungs Sicht - Komponentendiagramm 
+
+@startuml
+component "Local Control Logic" as Control
+component "Battery Module" as Battery
+component "Actuator Control" as Actuators
+component "MQTT Communication" as MQTT
+component "Local Visualization" as UI
+
+Control --> Battery
+Control --> Actuators
+Actuators --> Battery
+Control --> UI
+Battery --> MQTT
+@enduml
+
+
+--Logische Sicht - Klassendiagramm 
+
+@startuml
+class Battery {
+  percent : int
+  increase(value:int)
+  decrease(value:int)
+  isBelow(threshold:int) : bool
+  isFull() : bool
+}
+
+class Actuator {
+  id : String
+  state : bool
+  loadProfile : LoadProfile
+}
+
+class LoadProfile {
+  type : String
+  rate : int
+}
+
+class House {
+  battery : Battery
+  actuators : Actuator
+  calculateEnergy()
+  publishStatus()
+}
+
+class ChargingLogic {
+  startCharging()
+  stopCharging()
+}
+
+class PlatformPolicy {
+  evaluateStates()
+  startSupport()
+  pauseSupport()
+}
+
+House --> Battery
+House --> Actuator
+Actuator --> LoadProfile
+House --> ChargingLogic
+PlatformPolicy --> Battery
+@enduml
+
+
+--Use Case - Gesamt
+
+@startuml
+left to right direction
+
+actor "User" as user
+actor "IoT Plattform\nHomeKit mit Node-RED" as platform
+actor "MQTT Broker" as broker
+
+rectangle "Haus A" {
+  usecase "Lokale Aktuatoren steuern" as a1
+  usecase "Batteriestand berechnen" as a2
+  usecase "Batteriestand publizieren\nMQTT" as a3
+  usecase "Energie empfangen\nProzentpunkte" as a4
+}
+
+rectangle "Haus C" {
+  usecase "Lokale Aktuatoren steuern" as c1
+  usecase "Batteriestand berechnen" as c2
+  usecase "Eigenladung starten\nbei Bedarf" as c3
+  usecase "Energie liefern\nan Haus A" as c4
+  usecase "Batteriestand publizieren\nMQTT" as c5
+}
+
+rectangle "Zentrale IoT Plattform" {
+  usecase "Zustände auswerten\nRegellogik" as p1
+  usecase "Energieausgleich steuern" as p2
+}
+
+a3 --> broker
+c5 --> broker
+
+broker --> p1
+p1 --> p2
+
+p2 --> c3
+p2 --> c4
+p2 --> a4
+
+user --> a1
+user --> c1
+@enduml
+
+
+--Use Case - Haus C
+
+@startuml
+left to right direction
+actor "User" as user
+
+rectangle "Haus C System" {
+  usecase "Aktuatoren steuern\nlokal" as uc1
+  usecase "Batteriestand überwachen\nintern" as uc2
+  usecase "Ladebetrieb starten\nbei kritischer Schwelle" as uc3
+  usecase "Batteriestand erhöhen\nzeitbasiert" as uc4
+  usecase "Status publizieren\nMQTT" as uc5
+}
+
+user --> uc1
+uc1 --> uc2
+uc2 --> uc3
+uc3 --> uc4
+uc2 --> uc5
+
+
+@enduml
+
+--Use Case - Haus A
+
+@startuml
+left to right direction
+actor "Nutzer*in" as user
+
+
+rectangle "Haus A System" {
+  usecase "Aktuatoren sschalten über Menü" as ua1
+  usecase "Batteriestand berechnen und aktualisieren" as ua2
+  usecase "Zustand anzeigen\nLCD und LED" as ua3
+  usecase "Sperrmodus aktivieren\nbei kritischer Schwelle" as ua4
+  usecase "Party Mode konkonstanter Verbrauch" as ua5
+  usecase "Status publizieren\nMQTT" as ua6
+}
+
+user --> ua1
+ua1 --> ua2
+ua2 --> ua3
+ua2 --> ua4
+ua1 --> ua5
+ua5 --> ua2
+ua2 --> ua6
+@enduml
